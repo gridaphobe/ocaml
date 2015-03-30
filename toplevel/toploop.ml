@@ -18,7 +18,7 @@ open Config
 open Misc
 open Parsetree
 open Types
-open Typedtree
+(* open Typedtree *)
 open Outcometree
 open Ast_helper
 
@@ -255,8 +255,11 @@ let execute_phrase print_outcome ppf phr =
       let sg' = Typemod.simplify_signature sg in
       ignore (Includemod.signatures oldenv sg sg');
       Typecore.force_delayed_checks ();
-      let lam = Translmod.transl_toplevel_definition str in
+      (* let lam = Translmod.transl_toplevel_definition str in *)
       Warnings.check_fatal ();
+      toplevel_env := newenv;
+      true
+(*
       begin try
         toplevel_env := newenv;
         let res = load_lambda ppf lam in
@@ -289,6 +292,7 @@ let execute_phrase print_outcome ppf phr =
       with x ->
         toplevel_env := oldenv; raise x
       end
+*)
   | Ptop_dir(dir_name, dir_arg) ->
       let d =
         try Some (Hashtbl.find directive_table dir_name)
