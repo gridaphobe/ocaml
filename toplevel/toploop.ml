@@ -243,21 +243,156 @@ let print_exception_outcome ppf exn =
 
 let directive_table = (Hashtbl.create 13 : (string, directive_fun) Hashtbl.t)
 
+module StringSet = Set.Make(String)
+
+(* Extract bindings from a toplevel phrase *)
+let binder_of_pattern pat =
+  match pat.ppat_desc with
+  | Ppat_var v -> v.Asttypes.txt
+  | _ -> failwith "binder_of_pattern expected Ppat_var"
+let binding_of_value_binding vb = binder_of_pattern vb.pvb_pat
+  (* (binder_of_pattern vb.pvb_pat, vb.pvb_expr) *)
+let bindings_of_structure str =
+  match str with
+  | Pstr_value (_, bnds) ->
+     List.map binding_of_value_binding bnds
+  | _ ->
+     []
+let bindings_of_phrase phr =
+  match phr with
+  | Ptop_def sstr ->
+     List.concat (List.map (fun str -> bindings_of_structure (str.pstr_desc)) sstr)
+  | Ptop_dir _ -> 
+     []
+
+let rec string_of_longident = function
+  | Longident.Lident s -> s
+  | Longident.Ldot (l, s) -> string_of_longident l ^ "." ^ s
+  | _ -> Misc.fatal_error "string_of_longident"
+
+let rec fvs_expression env expr =
+  match expr.pexp_desc with
+  | Pexp_ident id ->
+     if StringSet.mem (string_of_longident id.Location.txt) env 
+     then StringSet.empty
+     else StringSet.singleton (string_of_longident id.Location.txt)
+  | Pexp_constant _ -> StringSet.empty
+  | Pexp_let (r, bnds, expr') ->
+     let fvs_bnds = fvs_value_binding_list r env bnds in
+     let env' = StringSet.union env (StringSet.of_list (List.map binding_of_value_binding bnds)) in
+     let fvs_expr' = fvs_expression env' expr' in
+     StringSet.union fvs_bnds fvs_expr'
+  | Pexp_function cs -> fvs_case_list env cs
+  | Pexp_fun (_, _, p, e) ->
+     StringSet.remove (binder_of_pattern p) (fvs_expression env e)
+  | Pexp_apply (e, les) ->
+     List.fold_left StringSet.union
+                    (fvs_expression env e)
+                    (List.map (fun (_, e) -> fvs_expression env e) les)
+  | Pexp_match (e, cs) ->
+     StringSet.union
+       (fvs_expression env e)
+       (fvs_case_list env cs)
+  | Pexp_try (e, cs) ->
+     StringSet.union
+       (fvs_expression env e)
+       (fvs_case_list env cs)
+  | Pexp_tuple es -> 
+     List.fold_left StringSet.union
+                    (fvs_expression env (List.hd es))
+                    (List.map (fvs_expression env) (List.tl es))
+  | Pexp_construct (c, e) -> 
+     StringSet.add (string_of_longident c.Location.txt)
+                   (match e with | None -> StringSet.empty | Some e' -> fvs_expression env e')
+  | _ -> failwith "fvs_expression"
+
+and fvs_case_list env cs =
+  List.fold_left StringSet.union StringSet.empty (List.map (fvs_case env) cs)
+
+and fvs_case env c =
+  StringSet.remove (binder_of_pattern c.pc_lhs)
+                   (StringSet.union (match c.pc_guard with | None -> StringSet.empty | Some e -> fvs_expression env e)
+                                    (fvs_expression env c.pc_rhs))
+
+and fvs_value_binding env bnd =
+  fvs_expression env bnd.pvb_expr
+
+and fvs_value_binding_list r env bnds =
+  match r with
+  | Asttypes.Nonrecursive ->
+     List.fold_left (fun acc b -> StringSet.union 
+                                    (StringSet.add (binder_of_pattern b.pvb_pat) acc)
+                                    (fvs_value_binding acc b))
+                    env bnds
+  | Asttypes.Recursive ->
+     let env' = StringSet.union env (StringSet.of_list (List.map binding_of_value_binding bnds)) in
+     List.fold_left (fun acc b -> StringSet.union
+                                    acc
+                                    (fvs_value_binding acc b))
+                    env' bnds
+
+and fvs_structure str =
+  match str.pstr_desc with
+  | Pstr_value (r, bnds) -> List.fold_left
+                              (fun acc b ->
+                                     StringSet.union (fvs_value_binding StringSet.empty b)
+                                                     acc)
+                              StringSet.empty
+                              bnds
+  | _ -> failwith "fvs_structure: unexpected argument"
+
+let free_variables = function
+  | Ptop_def str -> List.fold_left (fun acc s -> StringSet.union acc (fvs_structure s))
+                                   StringSet.empty
+                                   str
+  | _ -> failwith "free_variables: Ptop_dir"
+
+type phrase_closure =
+  PC of (toplevel_phrase * phrase_closure list)
+
+let is_binder_of var (PC (phr, _)) =
+  List.mem var (bindings_of_phrase phr)
+
+let most_recent_binding var phrs = 
+  match (List.filter (is_binder_of var) phrs) with
+  | [] -> None
+  | x::_ -> Some x
+
+let rec dependent_phrases : toplevel_phrase -> phrase_closure list -> toplevel_phrase list = fun phr phrs ->
+  List.fold_left
+    (fun acc var -> match most_recent_binding var phrs with
+                    | None -> acc
+                    | Some (PC (phr, clos)) -> phr :: (List.append acc (dependent_phrases phr clos)))
+    []
+    (StringSet.elements (free_variables phr))
+  
+
 (* Execute a toplevel phrase *)
+let phrases = ref []
 
 let execute_phrase print_outcome ppf phr =
   match phr with
   | Ptop_def sstr ->
       let oldenv = !toplevel_env in
       Typecore.reset_delayed_checks ();
-      let (str, sg, newenv) = Typemod.type_toplevel_phrase oldenv sstr in
+
+      let (str, sg, newenv) = begin try
+                                  Typemod.type_toplevel_phrase oldenv sstr
+                                with x ->
+                                  let deps = phr :: dependent_phrases phr !phrases in
+                                  List.iter (Pprintast.top_phrase ppf) (List.rev deps);
+                                  raise x
+                              end
+      in
+      phrases := (PC (phr, !phrases)) :: !phrases;
+      toplevel_env := newenv;
+
       if !Clflags.dump_typedtree then Printtyped.implementation ppf str;
       let sg' = Typemod.simplify_signature sg in
       ignore (Includemod.signatures oldenv sg sg');
       Typecore.force_delayed_checks ();
       (* let lam = Translmod.transl_toplevel_definition str in *)
       Warnings.check_fatal ();
-      toplevel_env := newenv;
       true
 (*
       begin try
@@ -479,7 +614,7 @@ exception PPerror
 
 let loop ppf =
   Location.formatter_for_warnings := ppf;
-  fprintf ppf "        OCaml version %s@.@." Config.version;
+  (* fprintf ppf "        OCaml version %s@.@." Config.version; *)
   initialize_toplevel_env ();
   let lb = Lexing.from_function refill_lexbuf in
   Location.init lb "//toplevel//";
