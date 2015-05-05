@@ -282,6 +282,9 @@ let rec string_of_longident = function
   | Longident.Ldot (l, s) -> string_of_longident l ^ "." ^ s
   | _ -> Misc.fatal_error "string_of_longident"
 
+let string_set_unions =
+  List.fold_left StringSet.union StringSet.empty
+
 (* free variables *)
 let rec fvs_expression expr =
   match expr.pexp_desc with
@@ -297,9 +300,8 @@ let rec fvs_expression expr =
   | Pexp_fun (_, _, p, e) ->
      StringSet.remove (binder_of_pattern p) (fvs_expression e)
   | Pexp_apply (e, les) ->
-     List.fold_left StringSet.union
-                    (fvs_expression e)
-                    (List.map (fun (_, e) -> fvs_expression e) les)
+     string_set_unions 
+       (fvs_expression e :: (List.map (fun (_, e) -> fvs_expression e) les))
   | Pexp_match (e, cs) ->
      StringSet.union
        (fvs_expression e)
@@ -308,17 +310,14 @@ let rec fvs_expression expr =
      StringSet.union
        (fvs_expression e)
        (fvs_case_list cs)
-  | Pexp_tuple es -> 
-     List.fold_left StringSet.union
-                    (fvs_expression (List.hd es))
-                    (List.map fvs_expression (List.tl es))
+  | Pexp_tuple es -> string_set_unions (List.map fvs_expression es)
   | Pexp_construct (c, e) -> 
      StringSet.add (string_of_longident c.Location.txt)
                    (match e with | None -> StringSet.empty | Some e' -> fvs_expression e')
   | _ -> failwith "fvs_expression"
 
 and fvs_case_list cs =
-  List.fold_left StringSet.union StringSet.empty (List.map fvs_case cs)
+  string_set_unions (List.map fvs_case cs)
 
 and fvs_case c =
   StringSet.remove (binder_of_pattern c.pc_lhs)
@@ -342,22 +341,26 @@ and fvs_value_binding_list r bnds =
      in r
   | Asttypes.Recursive ->
      let bound = StringSet.of_list (List.map binding_of_value_binding bnds) in
-     let fvs = List.fold_left
-                 (fun acc b ->
-                  StringSet.union acc (fvs_value_binding b))
-                 StringSet.empty
-                 bnds 
+     let fvs = string_set_unions (List.map fvs_value_binding bnds)
      in StringSet.diff fvs bound
+
+and fvs_type_kind = function
+  | Ptype_variant cs -> StringSet.empty
+     
+  | _ -> StringSet.empty
+
+and fvs_type_declaration t =
+  fvs_type_kind t.ptype_kind
 
 and fvs_structure str =
   match str.pstr_desc with
+  | Pstr_eval (e, _) -> fvs_expression e
   | Pstr_value (r, bnds) -> fvs_value_binding_list r bnds
+  | Pstr_type ts -> string_set_unions (List.map fvs_type_declaration ts)
   | _ -> failwith "fvs_structure: unexpected argument"
 
 let free_variables = function
-  | Ptop_def str -> List.fold_left (fun acc s -> StringSet.union acc (fvs_structure s))
-                                   StringSet.empty
-                                   str
+  | Ptop_def str -> string_set_unions (List.map fvs_structure str)
   | _ -> failwith "free_variables: Ptop_dir"
 
 type phrase_closure =
