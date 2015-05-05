@@ -250,95 +250,108 @@ let binder_of_pattern pat =
   match pat.ppat_desc with
   | Ppat_var v -> v.Asttypes.txt
   | _ -> failwith "binder_of_pattern expected Ppat_var"
+
 let binding_of_value_binding vb = binder_of_pattern vb.pvb_pat
-  (* (binder_of_pattern vb.pvb_pat, vb.pvb_expr) *)
+
+let bindings_of_type_kind tk =
+  match tk with
+  | Ptype_variant cs ->
+     List.map (fun cd -> cd.pcd_name.Location.txt) cs
+  | _ -> []
+
+let bindings_of_type t =
+  t.ptype_name.Location.txt :: bindings_of_type_kind t.ptype_kind
+
 let bindings_of_structure str =
   match str with
   | Pstr_value (_, bnds) ->
      List.map binding_of_value_binding bnds
-  | _ ->
-     []
+  | Pstr_type ts ->
+     List.concat (List.map bindings_of_type ts)
+  | Pstr_exception ec -> [ ec.pext_name.Location.txt ]
+  | _ -> []
+
 let bindings_of_phrase phr =
   match phr with
   | Ptop_def sstr ->
      List.concat (List.map (fun str -> bindings_of_structure (str.pstr_desc)) sstr)
-  | Ptop_dir _ -> 
-     []
+  | Ptop_dir _ -> []
 
 let rec string_of_longident = function
   | Longident.Lident s -> s
   | Longident.Ldot (l, s) -> string_of_longident l ^ "." ^ s
   | _ -> Misc.fatal_error "string_of_longident"
 
-let rec fvs_expression env expr =
+(* free variables *)
+let rec fvs_expression expr =
   match expr.pexp_desc with
   | Pexp_ident id ->
-     if StringSet.mem (string_of_longident id.Location.txt) env 
-     then StringSet.empty
-     else StringSet.singleton (string_of_longident id.Location.txt)
+     StringSet.singleton (string_of_longident id.Location.txt)
   | Pexp_constant _ -> StringSet.empty
   | Pexp_let (r, bnds, expr') ->
-     let fvs_bnds = fvs_value_binding_list r env bnds in
-     let env' = StringSet.union env (StringSet.of_list (List.map binding_of_value_binding bnds)) in
-     let fvs_expr' = fvs_expression env' expr' in
+     let fvs_bnds = fvs_value_binding_list r bnds in
+     let bound = StringSet.of_list (List.map binding_of_value_binding bnds) in
+     let fvs_expr' = StringSet.diff (fvs_expression expr') bound in
      StringSet.union fvs_bnds fvs_expr'
-  | Pexp_function cs -> fvs_case_list env cs
+  | Pexp_function cs -> fvs_case_list cs
   | Pexp_fun (_, _, p, e) ->
-     StringSet.remove (binder_of_pattern p) (fvs_expression env e)
+     StringSet.remove (binder_of_pattern p) (fvs_expression e)
   | Pexp_apply (e, les) ->
      List.fold_left StringSet.union
-                    (fvs_expression env e)
-                    (List.map (fun (_, e) -> fvs_expression env e) les)
+                    (fvs_expression e)
+                    (List.map (fun (_, e) -> fvs_expression e) les)
   | Pexp_match (e, cs) ->
      StringSet.union
-       (fvs_expression env e)
-       (fvs_case_list env cs)
+       (fvs_expression e)
+       (fvs_case_list cs)
   | Pexp_try (e, cs) ->
      StringSet.union
-       (fvs_expression env e)
-       (fvs_case_list env cs)
+       (fvs_expression e)
+       (fvs_case_list cs)
   | Pexp_tuple es -> 
      List.fold_left StringSet.union
-                    (fvs_expression env (List.hd es))
-                    (List.map (fvs_expression env) (List.tl es))
+                    (fvs_expression (List.hd es))
+                    (List.map fvs_expression (List.tl es))
   | Pexp_construct (c, e) -> 
      StringSet.add (string_of_longident c.Location.txt)
-                   (match e with | None -> StringSet.empty | Some e' -> fvs_expression env e')
+                   (match e with | None -> StringSet.empty | Some e' -> fvs_expression e')
   | _ -> failwith "fvs_expression"
 
-and fvs_case_list env cs =
-  List.fold_left StringSet.union StringSet.empty (List.map (fvs_case env) cs)
+and fvs_case_list cs =
+  List.fold_left StringSet.union StringSet.empty (List.map fvs_case cs)
 
-and fvs_case env c =
+and fvs_case c =
   StringSet.remove (binder_of_pattern c.pc_lhs)
-                   (StringSet.union (match c.pc_guard with | None -> StringSet.empty | Some e -> fvs_expression env e)
-                                    (fvs_expression env c.pc_rhs))
+                   (StringSet.union (match c.pc_guard with | None -> StringSet.empty | Some e -> fvs_expression e)
+                                    (fvs_expression c.pc_rhs))
 
-and fvs_value_binding env bnd =
-  fvs_expression env bnd.pvb_expr
+and fvs_value_binding bnd =
+  fvs_expression bnd.pvb_expr
 
-and fvs_value_binding_list r env bnds =
+and fvs_value_binding_list r bnds =
   match r with
   | Asttypes.Nonrecursive ->
-     List.fold_left (fun acc b -> StringSet.union 
-                                    (StringSet.add (binder_of_pattern b.pvb_pat) acc)
-                                    (fvs_value_binding acc b))
-                    env bnds
+     let (r, _) = List.fold_left 
+                    (fun (fvs, bound) b -> 
+                     (StringSet.diff
+                        (StringSet.union fvs (fvs_value_binding b))
+                        bound
+                     ,(StringSet.add (binder_of_pattern b.pvb_pat) bound)))
+                    (StringSet.empty, StringSet.empty)
+                    bnds
+     in r
   | Asttypes.Recursive ->
-     let env' = StringSet.union env (StringSet.of_list (List.map binding_of_value_binding bnds)) in
-     List.fold_left (fun acc b -> StringSet.union
-                                    acc
-                                    (fvs_value_binding acc b))
-                    env' bnds
+     let bound = StringSet.of_list (List.map binding_of_value_binding bnds) in
+     let fvs = List.fold_left
+                 (fun acc b ->
+                  StringSet.union acc (fvs_value_binding b))
+                 StringSet.empty
+                 bnds 
+     in StringSet.diff fvs bound
 
 and fvs_structure str =
   match str.pstr_desc with
-  | Pstr_value (r, bnds) -> List.fold_left
-                              (fun acc b ->
-                                     StringSet.union (fvs_value_binding StringSet.empty b)
-                                                     acc)
-                              StringSet.empty
-                              bnds
+  | Pstr_value (r, bnds) -> fvs_value_binding_list r bnds
   | _ -> failwith "fvs_structure: unexpected argument"
 
 let free_variables = function
@@ -358,7 +371,7 @@ let most_recent_binding var phrs =
   | [] -> None
   | x::_ -> Some x
 
-let rec dependent_phrases : toplevel_phrase -> phrase_closure list -> toplevel_phrase list = fun phr phrs ->
+let rec dependent_phrases phr phrs =
   List.fold_left
     (fun acc var -> match most_recent_binding var phrs with
                     | None -> acc
@@ -380,7 +393,9 @@ let execute_phrase print_outcome ppf phr =
                                   Typemod.type_toplevel_phrase oldenv sstr
                                 with x ->
                                   let deps = phr :: dependent_phrases phr !phrases in
+                                  print_endline "BEGIN MINIMAL PROGRAM";
                                   List.iter (Pprintast.top_phrase ppf) (List.rev deps);
+                                  print_endline "END MINIMAL PROGRAM";
                                   raise x
                               end
       in
