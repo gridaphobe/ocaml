@@ -344,8 +344,23 @@ and fvs_value_binding_list r bnds =
      let fvs = string_set_unions (List.map fvs_value_binding bnds)
      in StringSet.diff fvs bound
 
+and fvs_core_type t =
+  match t.ptyp_desc with
+  | Ptyp_arrow (_, t1, t2) ->
+     StringSet.union (fvs_core_type t1) (fvs_core_type t2)
+  | Ptyp_tuple ts ->
+     string_set_unions (List.map fvs_core_type ts)
+  | Ptyp_constr (t, ts) ->
+     StringSet.add (string_of_longident t.Location.txt)
+                   (string_set_unions (List.map fvs_core_type ts))
+  | _ -> StringSet.empty
+
 and fvs_type_kind = function
-  | Ptype_variant cs -> StringSet.empty
+  | Ptype_variant cs ->
+     string_set_unions
+       (List.map (fun cd -> string_set_unions
+                              (List.map fvs_core_type cd.pcd_args))
+                 cs)
      
   | _ -> StringSet.empty
 
