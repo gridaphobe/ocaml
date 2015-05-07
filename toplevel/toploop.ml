@@ -246,12 +246,14 @@ let directive_table = (Hashtbl.create 13 : (string, directive_fun) Hashtbl.t)
 module StringSet = Set.Make(String)
 
 (* Extract bindings from a toplevel phrase *)
-let binder_of_pattern pat =
+let rec bindings_of_pattern pat =
   match pat.ppat_desc with
-  | Ppat_var v -> v.Asttypes.txt
-  | _ -> failwith "binder_of_pattern expected Ppat_var"
+  | Ppat_var v -> [v.Asttypes.txt]
+  | Ppat_alias (p, _) -> bindings_of_pattern p
+  | Ppat_tuple ps -> List.concat (List.map bindings_of_pattern ps)
+  | _ -> []
 
-let binding_of_value_binding vb = binder_of_pattern vb.pvb_pat
+let bindings_of_value_binding vb = bindings_of_pattern vb.pvb_pat
 
 let bindings_of_type_kind tk =
   match tk with
@@ -265,7 +267,7 @@ let bindings_of_type t =
 let bindings_of_structure str =
   match str with
   | Pstr_value (_, bnds) ->
-     List.map binding_of_value_binding bnds
+     List.concat (List.map bindings_of_value_binding bnds)
   | Pstr_type ts ->
      List.concat (List.map bindings_of_type ts)
   | Pstr_exception ec -> [ ec.pext_name.Location.txt ]
@@ -293,12 +295,12 @@ let rec fvs_expression expr =
   | Pexp_constant _ -> StringSet.empty
   | Pexp_let (r, bnds, expr') ->
      let fvs_bnds = fvs_value_binding_list r bnds in
-     let bound = StringSet.of_list (List.map binding_of_value_binding bnds) in
+     let bound = StringSet.of_list (List.concat (List.map bindings_of_value_binding bnds)) in
      let fvs_expr' = StringSet.diff (fvs_expression expr') bound in
      StringSet.union fvs_bnds fvs_expr'
   | Pexp_function cs -> fvs_case_list cs
   | Pexp_fun (_, _, p, e) ->
-     StringSet.remove (binder_of_pattern p) (fvs_expression e)
+     StringSet.diff (fvs_expression e) (StringSet.of_list (bindings_of_pattern p))
   | Pexp_apply (e, les) ->
      string_set_unions 
        (fvs_expression e :: (List.map (fun (_, e) -> fvs_expression e) les))
@@ -314,15 +316,42 @@ let rec fvs_expression expr =
   | Pexp_construct (c, e) -> 
      StringSet.add (string_of_longident c.Location.txt)
                    (match e with | None -> StringSet.empty | Some e' -> fvs_expression e')
-  | _ -> failwith "fvs_expression"
+  | Pexp_ifthenelse (b,t,f) ->
+     StringSet.union (StringSet.union (fvs_expression b) (fvs_expression t))
+                     (match f with | None -> StringSet.empty | Some e -> fvs_expression e)
+  | Pexp_field (e,l) -> fvs_expression e
+  | Pexp_variant _ -> failwith "fvs_expression: Pexp_variant"
+  | Pexp_record _ -> failwith "fvs_expression: Pexp_record"
+  | Pexp_setfield _ -> failwith "fvs_expression: Pexp_setfield"
+  | Pexp_array _ -> failwith "fvs_expression: Pexp_array"
+  | Pexp_sequence (e1,e2) -> StringSet.union (fvs_expression e1) (fvs_expression e2)
+  | Pexp_while _ -> failwith "fvs_expression: Pexp_while"
+  | Pexp_for _ -> failwith "fvs_expression: Pexp_for"
+  | Pexp_constraint (e,t) -> StringSet.union (fvs_expression e) (fvs_core_type t)
+  | Pexp_coerce _ -> failwith "fvs_expression: Pexp_coerce"
+  | Pexp_send _ -> failwith "fvs_expression: Pexp_send"
+  | Pexp_new _ -> failwith "fvs_expression: Pexp_new"
+  | Pexp_setinstvar _ -> failwith "fvs_expression: Pexp_setinstvar"
+  | Pexp_override _ -> failwith "fvs_expression: Pexp_override"
+  | Pexp_letmodule _ -> failwith "fvs_expression: Pexp_letmodule"
+  | Pexp_assert e -> fvs_expression e
+  | Pexp_lazy _ -> failwith "fvs_expression: Pexp_lazy"
+  | Pexp_poly _ -> failwith "fvs_expression: Pexp_poly"
+  | Pexp_object _ -> failwith "fvs_expression: Pexp_object"
+  | Pexp_newtype _ -> failwith "fvs_expression: Pexp_newtype"
+  | Pexp_pack _ -> failwith "fvs_expression: Pexp_pack"
+  | Pexp_open _ -> failwith "fvs_expression: Pexp_open"
+  | Pexp_extension _ -> failwith "fvs_expression: Pexp_extension"
 
 and fvs_case_list cs =
   string_set_unions (List.map fvs_case cs)
 
 and fvs_case c =
-  StringSet.remove (binder_of_pattern c.pc_lhs)
-                   (StringSet.union (match c.pc_guard with | None -> StringSet.empty | Some e -> fvs_expression e)
-                                    (fvs_expression c.pc_rhs))
+  StringSet.diff (StringSet.union (match c.pc_guard with
+                                   | None -> StringSet.empty
+                                   | Some e -> fvs_expression e)
+                                  (fvs_expression c.pc_rhs))
+                 (StringSet.of_list (bindings_of_pattern c.pc_lhs))
 
 and fvs_value_binding bnd =
   fvs_expression bnd.pvb_expr
@@ -335,12 +364,13 @@ and fvs_value_binding_list r bnds =
                      (StringSet.diff
                         (StringSet.union fvs (fvs_value_binding b))
                         bound
-                     ,(StringSet.add (binder_of_pattern b.pvb_pat) bound)))
+                     ,(StringSet.union (StringSet.of_list (bindings_of_pattern b.pvb_pat))
+                                       bound)))
                     (StringSet.empty, StringSet.empty)
                     bnds
      in r
   | Asttypes.Recursive ->
-     let bound = StringSet.of_list (List.map binding_of_value_binding bnds) in
+     let bound = StringSet.of_list (List.concat (List.map bindings_of_value_binding bnds)) in
      let fvs = string_set_unions (List.map fvs_value_binding bnds)
      in StringSet.diff fvs bound
 
@@ -361,17 +391,18 @@ and fvs_type_kind = function
        (List.map (fun cd -> string_set_unions
                               (List.map fvs_core_type cd.pcd_args))
                  cs)
-     
+
   | _ -> StringSet.empty
 
 and fvs_type_declaration t =
-  fvs_type_kind t.ptype_kind
+  StringSet.remove (t.ptype_name.Location.txt) (fvs_type_kind t.ptype_kind)
 
 and fvs_structure str =
   match str.pstr_desc with
   | Pstr_eval (e, _) -> fvs_expression e
   | Pstr_value (r, bnds) -> fvs_value_binding_list r bnds
   | Pstr_type ts -> string_set_unions (List.map fvs_type_declaration ts)
+  | Pstr_exception ec -> StringSet.empty     (* FIXME: not correct.. *)
   | _ -> failwith "fvs_structure: unexpected argument"
 
 let free_variables = function
@@ -396,7 +427,7 @@ let rec dependent_phrases phr phrs =
                     | Some (PC (phr, clos)) -> phr :: (List.append acc (dependent_phrases phr clos)))
     []
     (StringSet.elements (free_variables phr))
-  
+
 
 (* Execute a toplevel phrase *)
 let phrases = ref []
@@ -411,7 +442,7 @@ let execute_phrase print_outcome ppf phr =
                                   Typemod.type_toplevel_phrase oldenv sstr
                                 with x ->
                                   let deps = phr :: dependent_phrases phr !phrases in
-                                  print_endline "BEGIN MINIMAL PROGRAM";
+                                  (* print_endline "BEGIN MINIMAL PROGRAM"; *)
                                   List.iter (Pprintast.top_phrase ppf) (List.rev deps);
                                   print_endline "END MINIMAL PROGRAM";
                                   raise x
@@ -585,10 +616,10 @@ let refill_lexbuf buffer len =
   if !got_eof then (got_eof := false; 0) else begin
     let prompt =
       if !Clflags.noprompt then ""
-      else if !first_line then "# "
+      else if !first_line then "OK\n" (* "# " *)
       else if !Clflags.nopromptcont then ""
-      else if Lexer.in_comment () then "* "
-      else "  "
+      else if Lexer.in_comment () then ""
+      else ""
     in
     first_line := false;
     let (len, eof) = !read_interactive_input prompt buffer len in
