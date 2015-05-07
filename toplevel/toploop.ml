@@ -274,10 +274,7 @@ let bindings_of_structure str =
   | _ -> []
 
 let bindings_of_phrase phr =
-  match phr with
-  | Ptop_def sstr ->
-     List.concat (List.map (fun str -> bindings_of_structure (str.pstr_desc)) sstr)
-  | Ptop_dir _ -> []
+     List.concat (List.map (fun str -> bindings_of_structure (str.pstr_desc)) phr)
 
 let rec string_of_longident = function
   | Longident.Lident s -> s
@@ -302,7 +299,7 @@ let rec fvs_expression expr =
   | Pexp_fun (_, _, p, e) ->
      StringSet.diff (fvs_expression e) (StringSet.of_list (bindings_of_pattern p))
   | Pexp_apply (e, les) ->
-     string_set_unions 
+     string_set_unions
        (fvs_expression e :: (List.map (fun (_, e) -> fvs_expression e) les))
   | Pexp_match (e, cs) ->
      StringSet.union
@@ -313,7 +310,7 @@ let rec fvs_expression expr =
        (fvs_expression e)
        (fvs_case_list cs)
   | Pexp_tuple es -> string_set_unions (List.map fvs_expression es)
-  | Pexp_construct (c, e) -> 
+  | Pexp_construct (c, e) ->
      StringSet.add (string_of_longident c.Location.txt)
                    (match e with | None -> StringSet.empty | Some e' -> fvs_expression e')
   | Pexp_ifthenelse (b,t,f) ->
@@ -347,11 +344,24 @@ and fvs_case_list cs =
   string_set_unions (List.map fvs_case cs)
 
 and fvs_case c =
-  StringSet.diff (StringSet.union (match c.pc_guard with
-                                   | None -> StringSet.empty
-                                   | Some e -> fvs_expression e)
-                                  (fvs_expression c.pc_rhs))
+  StringSet.diff (StringSet.union
+                    (match c.pc_guard with
+                     | None -> StringSet.empty
+                     | Some e -> fvs_expression e)
+                    (StringSet.union
+                       (fvs_pattern c.pc_lhs)
+                       (fvs_expression c.pc_rhs)))
                  (StringSet.of_list (bindings_of_pattern c.pc_lhs))
+
+and fvs_pattern p =
+  match p.ppat_desc with
+  | Ppat_alias (p, _) -> fvs_pattern p
+  | Ppat_tuple ps -> string_set_unions (List.map fvs_pattern ps)
+  | Ppat_construct (c, p) -> StringSet.add (string_of_longident c.Location.txt)
+                                           (match p with
+                                            | Some p' -> fvs_pattern p'
+                                            | None -> StringSet.empty)
+  | _ -> StringSet.empty
 
 and fvs_value_binding bnd =
   fvs_expression bnd.pvb_expr
@@ -359,8 +369,8 @@ and fvs_value_binding bnd =
 and fvs_value_binding_list r bnds =
   match r with
   | Asttypes.Nonrecursive ->
-     let (r, _) = List.fold_left 
-                    (fun (fvs, bound) b -> 
+     let (r, _) = List.fold_left
+                    (fun (fvs, bound) b ->
                      (StringSet.diff
                         (StringSet.union fvs (fvs_value_binding b))
                         bound
@@ -401,21 +411,22 @@ and fvs_structure str =
   match str.pstr_desc with
   | Pstr_eval (e, _) -> fvs_expression e
   | Pstr_value (r, bnds) -> fvs_value_binding_list r bnds
-  | Pstr_type ts -> string_set_unions (List.map fvs_type_declaration ts)
+  | Pstr_type ts -> StringSet.diff
+                      (string_set_unions (List.map fvs_type_declaration ts))
+                      (StringSet.of_list (List.concat (List.map bindings_of_type ts)))
   | Pstr_exception ec -> StringSet.empty     (* FIXME: not correct.. *)
   | _ -> failwith "fvs_structure: unexpected argument"
 
-let free_variables = function
-  | Ptop_def str -> string_set_unions (List.map fvs_structure str)
-  | _ -> failwith "free_variables: Ptop_dir"
+let free_variables str =
+  string_set_unions (List.map fvs_structure str)
 
 type phrase_closure =
-  PC of (toplevel_phrase * phrase_closure list)
+  PC of (structure * phrase_closure list)
 
 let is_binder_of var (PC (phr, _)) =
   List.mem var (bindings_of_phrase phr)
 
-let most_recent_binding var phrs = 
+let most_recent_binding var phrs =
   match (List.filter (is_binder_of var) phrs) with
   | [] -> None
   | x::_ -> Some x
@@ -431,6 +442,7 @@ let rec dependent_phrases phr phrs =
 
 (* Execute a toplevel phrase *)
 let phrases = ref []
+let initial_env = ref Env.empty
 
 let execute_phrase print_outcome ppf phr =
   match phr with
@@ -438,17 +450,42 @@ let execute_phrase print_outcome ppf phr =
       let oldenv = !toplevel_env in
       Typecore.reset_delayed_checks ();
 
-      let (str, sg, newenv) = begin try
-                                  Typemod.type_toplevel_phrase oldenv sstr
-                                with x ->
-                                  let deps = phr :: dependent_phrases phr !phrases in
-                                  (* print_endline "BEGIN MINIMAL PROGRAM"; *)
-                                  List.iter (Pprintast.top_phrase ppf) (List.rev deps);
-                                  print_endline "END MINIMAL PROGRAM";
-                                  raise x
-                              end
+      let (str, sg, newenv) =
+        begin try
+            Typemod.type_toplevel_phrase oldenv sstr
+          with x ->
+            match Location.error_of_exn x with
+            | Some e ->
+                let deps = List.rev (sstr :: dependent_phrases sstr !phrases) in
+                List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
+                print_endline "END MINIMAL PROGRAM";
+                begin try
+                    ignore
+                      (List.fold_left
+                         (fun env p -> let (str, sg, e) = Typemod.type_toplevel_phrase env p
+                                       in e)
+                         (!initial_env)
+                         deps);
+                    print_endline "NO ERROR FROM MINIMAL PROGRAM!!!";
+                    raise x
+                  with x' ->
+                    match Location.error_of_exn x' with
+                    | Some e' when e.Location.msg = e'.Location.msg ->
+                       raise x
+                    | Some e'->
+                       print_endline e.Location.msg;
+                       print_endline e'.Location.msg;
+                       print_endline "MINIMAL PROGRAM DIFFERENT ERROR!!!!!!";
+                       raise x
+                    | None ->
+                       print_endline e.Location.msg;
+                       print_endline "MINIMAL PROGRAM CRASH!!!!!!";
+                       raise x
+                end
+            | None -> raise x
+        end
       in
-      phrases := (PC (phr, !phrases)) :: !phrases;
+      phrases := (PC (sstr, !phrases)) :: !phrases;
       toplevel_env := newenv;
 
       if !Clflags.dump_typedtree then Printtyped.implementation ppf str;
@@ -670,7 +707,8 @@ let set_paths () =
   Dll.add_path !load_path
 
 let initialize_toplevel_env () =
-  toplevel_env := Compmisc.initial_env()
+  toplevel_env := Compmisc.initial_env();
+  initial_env := !toplevel_env
 
 (* The interactive loop *)
 
