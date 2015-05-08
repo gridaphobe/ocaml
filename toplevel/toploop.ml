@@ -439,6 +439,11 @@ let rec dependent_phrases phr phrs =
     []
     (StringSet.elements (free_variables phr))
 
+let removeDuplicates list =
+  let rec aux acc = function
+    | [] -> acc
+    | h :: t -> if (List.mem h t) then aux acc t else aux (h::acc) t
+  in List.rev (aux [] list);;
 
 (* Execute a toplevel phrase *)
 let phrases = ref []
@@ -456,7 +461,7 @@ let execute_phrase print_outcome ppf phr =
           with x ->
             match Location.error_of_exn x with
             | Some e ->
-                let deps = List.rev (sstr :: dependent_phrases sstr !phrases) in
+                let deps = removeDuplicates (List.rev (sstr :: dependent_phrases sstr !phrases)) in
                 List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
                 print_endline "END MINIMAL PROGRAM";
                 begin try
