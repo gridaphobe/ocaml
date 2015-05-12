@@ -322,8 +322,8 @@ let rec fvs_expression expr =
   | Pexp_setfield _ -> failwith "fvs_expression: Pexp_setfield"
   | Pexp_array _ -> failwith "fvs_expression: Pexp_array"
   | Pexp_sequence (e1,e2) -> StringSet.union (fvs_expression e1) (fvs_expression e2)
-  | Pexp_while _ -> failwith "fvs_expression: Pexp_while"
-  | Pexp_for _ -> failwith "fvs_expression: Pexp_for"
+  | Pexp_while (e1,e2) -> StringSet.union (fvs_expression e1) (fvs_expression e2)
+  | Pexp_for (p,e1,e2,_,e3) -> string_set_unions [fvs_pattern p; fvs_expression e1; fvs_expression e2; fvs_expression e3]
   | Pexp_constraint (e,t) -> StringSet.union (fvs_expression e) (fvs_core_type t)
   | Pexp_coerce _ -> failwith "fvs_expression: Pexp_coerce"
   | Pexp_send _ -> failwith "fvs_expression: Pexp_send"
