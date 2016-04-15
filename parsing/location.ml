@@ -332,7 +332,7 @@ let rec report_error ppf ({loc; msg; sub; if_highlight} as err) =
   if highlighted then
     Format.pp_print_string ppf if_highlight
   else begin
-    (* print ppf loc; *)
+    print ppf loc;
     Format.pp_print_string ppf msg;
     List.iter (fun err -> Format.fprintf ppf "@\n@[<2>%a@]" report_error err)
               sub
