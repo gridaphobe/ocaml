@@ -454,16 +454,15 @@ let execute_phrase print_outcome ppf phr =
   | Ptop_def sstr ->
       let oldenv = !toplevel_env in
       Typecore.reset_delayed_checks ();
-
+      let deps = removeDuplicates (List.rev (sstr :: dependent_phrases sstr !phrases)) in
+      List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
+      print_endline "END MINIMAL PROGRAM";
       let (str, sg, newenv) =
         begin try
             Typemod.type_toplevel_phrase oldenv sstr
           with x ->
             match Location.error_of_exn x with
             | Some e ->
-                let deps = removeDuplicates (List.rev (sstr :: dependent_phrases sstr !phrases)) in
-                List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
-                print_endline "END MINIMAL PROGRAM";
                 begin try
                     ignore
                       (List.fold_left
