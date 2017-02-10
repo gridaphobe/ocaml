@@ -415,7 +415,7 @@ and fvs_structure str =
                       (string_set_unions (List.map fvs_type_declaration ts))
                       (StringSet.of_list (List.concat (List.map bindings_of_type ts)))
   | Pstr_exception ec -> StringSet.empty     (* FIXME: not correct.. *)
-  | _ -> failwith "fvs_structure: unexpected argument"
+  | _ -> StringSet.empty (* failwith "fvs_structure: unexpected argument" *)
 
 let free_variables str =
   string_set_unions (List.map fvs_structure str)
@@ -455,8 +455,12 @@ let execute_phrase print_outcome ppf phr =
       let oldenv = !toplevel_env in
       Typecore.reset_delayed_checks ();
       let deps = removeDuplicates (List.rev (sstr :: dependent_phrases sstr !phrases)) in
-      List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
-      print_endline "END MINIMAL PROGRAM";
+      let dep_binds = List.concat (List.map (fun d -> bindings_of_phrase d) deps) in
+      if dep_binds = removeDuplicates dep_binds
+      then begin
+        List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
+        print_endline "END MINIMAL PROGRAM";
+      end;
       let (str, sg, newenv) =
         begin try
             Typemod.type_toplevel_phrase oldenv sstr
