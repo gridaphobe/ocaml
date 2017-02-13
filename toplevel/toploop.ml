@@ -317,14 +317,17 @@ let rec fvs_expression expr =
      StringSet.union (StringSet.union (fvs_expression b) (fvs_expression t))
                      (match f with | None -> StringSet.empty | Some e -> fvs_expression e)
   | Pexp_field (e,l) -> fvs_expression e
+  (*
   | Pexp_variant _ -> failwith "fvs_expression: Pexp_variant"
   | Pexp_record _ -> failwith "fvs_expression: Pexp_record"
   | Pexp_setfield _ -> failwith "fvs_expression: Pexp_setfield"
   | Pexp_array _ -> failwith "fvs_expression: Pexp_array"
+  *)
   | Pexp_sequence (e1,e2) -> StringSet.union (fvs_expression e1) (fvs_expression e2)
   | Pexp_while (e1,e2) -> StringSet.union (fvs_expression e1) (fvs_expression e2)
   | Pexp_for (p,e1,e2,_,e3) -> string_set_unions [fvs_pattern p; fvs_expression e1; fvs_expression e2; fvs_expression e3]
   | Pexp_constraint (e,t) -> StringSet.union (fvs_expression e) (fvs_core_type t)
+  (*
   | Pexp_coerce _ -> failwith "fvs_expression: Pexp_coerce"
   | Pexp_send _ -> failwith "fvs_expression: Pexp_send"
   | Pexp_new _ -> failwith "fvs_expression: Pexp_new"
@@ -339,6 +342,8 @@ let rec fvs_expression expr =
   | Pexp_pack _ -> failwith "fvs_expression: Pexp_pack"
   | Pexp_open _ -> failwith "fvs_expression: Pexp_open"
   | Pexp_extension _ -> failwith "fvs_expression: Pexp_extension"
+  *)
+  | _ -> StringSet.empty
 
 and fvs_case_list cs =
   string_set_unions (List.map fvs_case cs)
