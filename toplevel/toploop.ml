@@ -461,7 +461,7 @@ let execute_phrase print_outcome ppf phr =
       Typecore.reset_delayed_checks ();
       let deps = removeDuplicates (List.rev (sstr :: dependent_phrases sstr !phrases)) in
       let dep_binds = List.concat (List.map (fun d -> bindings_of_phrase d) deps) in
-      if dep_binds = removeDuplicates dep_binds
+      if dep_binds = (*removeDuplicates*) dep_binds
       then begin
         List.iter (fun d -> Pprintast.top_phrase ppf (Ptop_def d)) deps;
         print_endline "END MINIMAL PROGRAM";
